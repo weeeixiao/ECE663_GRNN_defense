@@ -3,6 +3,7 @@
 # Python version: 3.6
 
 import torch
+import copy
 from torch import nn, autograd
 from utils.dp_mechanism import cal_sensitivity, cal_sensitivity_MA, Laplace, Gaussian_Simple, Gaussian_MA
 from torch.utils.data import DataLoader, Dataset
@@ -24,12 +25,14 @@ class DatasetSplit(Dataset):
 
 
 class LocalUpdateDP(object):
-    def __init__(self, args, dataset=None, idxs=None):
+    def __init__(self, args, dataset=None, idxs=None, batchsize=None):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         self.idxs_sample = np.random.choice(list(idxs), int(self.args.dp_sample * len(idxs)), replace=False)
-        self.ldr_train = DataLoader(DatasetSplit(dataset, self.idxs_sample), batch_size=len(self.idxs_sample),
-                                    shuffle=True)
+        if batchsize:
+            self.ldr_train = DataLoader(DatasetSplit(dataset, self.idxs_sample), batch_size=batchsize, shuffle=True)
+        else:
+            self.ldr_train = DataLoader(DatasetSplit(dataset, self.idxs_sample), batch_size=len(self.idxs_sample), shuffle=True)
         self.idxs = idxs
         self.times = self.args.epochs * self.args.frac
         self.lr = args.lr
@@ -68,6 +71,47 @@ class LocalUpdateDP(object):
         self.lr = scheduler.get_last_lr()[0]
         return net.state_dict(), loss_client
 
+    def record_train(self, net):
+        net.train()
+        optimizer = torch.optim.SGD(net.parameters(), lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=self.args.lr_decay)
+        loss_client = 0
+        clipped_and_noised_grads = None
+
+        net_record = None
+        img_record = None
+
+        for idx, (images, labels) in enumerate(self.ldr_train):
+            images, labels = images.to(self.args.device), labels.to(self.args.device)
+            net.zero_grad()
+            log_probs = net(images)
+            loss = self.loss_func(log_probs, labels)
+            # auto_g = torch.autograd.grad(loss, net.parameters(), create_graph=True)
+            loss.backward(retain_graph=True)
+            # --------------------------------------------------------------------------------
+            if self.args.dp_mechanism != 'no_dp':
+                self.clip_gradients(net)
+                self.add_noise_to_grad(net)
+
+            if idx == len(self.ldr_train) - 1:
+                clipped_and_noised_grads = [param.grad.clone().detach() for param in net.parameters() if param.grad is not None]
+                net_record = copy.deepcopy(net).to(self.args.device)
+                img_record = images
+
+            # optimizer.step()
+            # scheduler.step()
+            # # add noises to parameters
+            # if self.args.dp_mechanism != 'no_dp':
+            #     self.add_noise(net)
+            optimizer.step()
+            scheduler.step()
+            # --------------------------------------------------------------------------------
+            loss_client = loss.item()
+        self.lr = scheduler.get_last_lr()[0]
+
+        # auto_g = torch.autograd.grad(loss_client, net.parameters(), create_graph=True)
+        return net.state_dict(), loss_client, clipped_and_noised_grads, net_record, img_record
+
     def clip_gradients(self, net):
         if self.args.dp_mechanism == 'Laplace':
             # Laplace use 1 norm
@@ -91,6 +135,25 @@ class LocalUpdateDP(object):
         # average per sample gradient after clipping and set back gradient
         for param in net.parameters():
             param.grad = param.grad_sample.detach().mean(dim=0)
+
+    # --------------------------------------------------------------------------------
+    def add_noise_to_grad(self, net):
+        sensitivity = cal_sensitivity(self.lr, self.args.dp_clip, len(self.idxs_sample))
+        for param in net.parameters():
+            if param.grad is not None:
+                if self.args.dp_mechanism == 'Laplace':
+                    noise = torch.from_numpy(
+                        np.random.laplace(0, sensitivity * self.noise_scale, size=param.grad.shape)
+                    ).to(self.args.device)
+                elif self.args.dp_mechanism == 'Gaussian':
+                    noise = torch.from_numpy(
+                        np.random.normal(0, sensitivity * self.noise_scale, size=param.grad.shape)
+                    ).to(self.args.device)
+                else:
+                    noise = torch.zeros_like(param.grad)
+
+                param.grad.add_(noise)
+    # --------------------------------------------------------------------------------
 
     def add_noise(self, net):
         sensitivity = cal_sensitivity(self.lr, self.args.dp_clip, len(self.idxs_sample))
