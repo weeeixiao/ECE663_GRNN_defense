@@ -17,7 +17,7 @@ def flatten_gradients(dy_dx):
             flatten_dy_dx = torch.cat((flatten_dy_dx, torch.flatten(layer_g)))
     return flatten_dy_dx
 
-def gen_dataset(dataset, data_path, shape_img):
+def gen_dataset(dataset, data_path, shape_img, train=True):
     class Dataset_from_Image(Dataset):
         def __init__(self, imgs, labs, transform=None):
             self.imgs = imgs
@@ -64,6 +64,11 @@ def gen_dataset(dataset, data_path, shape_img):
         tt = transforms.Compose([transforms.Resize(shape_img),
                                  transforms.ToTensor()])
         dst = datasets.CIFAR100(os.path.join(data_path, 'cifar100/'), download=True, transform=tt)
+    elif dataset == 'cifar10':
+        num_classes = 10
+        tt = transforms.Compose([transforms.Resize(shape_img),
+                                 transforms.ToTensor()])
+        dst = datasets.CIFAR10(os.path.join(data_path, 'cifar10/'), download=True, transform=tt, train=train)
     elif dataset == 'lfw':
         num_classes = 5749
         dst = face_dataset(os.path.join(data_path, 'lfw/'), shape_img)

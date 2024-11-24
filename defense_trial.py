@@ -10,7 +10,7 @@ from torchvision import datasets, transforms
 import torch
 import os
 
-from utils.sampling import mnist_iid, mnist_noniid, cifar_iid,cifar_noniid
+from utils.sampling import mnist_iid, mnist_noniid, cifar_iid,cifar_noniid, lfw_noniid
 from utils.options import args_parser
 from models.Update import LocalUpdateDP, LocalUpdateDPSerial
 from models.Nets import MLP, CNNMnist, CNNCifar, CNNFemnist, CharLSTM
@@ -23,6 +23,7 @@ from Generator.model import Generator
 from grnn_utils import *
 from tqdm import tqdm
 from Backbone import *
+import time, datetime
 
 
 def my_seed():
@@ -33,7 +34,7 @@ def my_seed():
     torch.cuda.manual_seed(123)
 
 
-def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record):
+def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record, lbl_record):
     # num_classes = 10
     # Gnet = Generator(num_classes, channel=1, shape_img=args.shape_img[0], batchsize=batch_size, g_in=args.g_in).cuda(args.device0)
     Gnet = Generator(num_classes, channel=3, shape_img=args.shape_img[0], batchsize=args.batchsize, g_in=args.g_in).cuda(args.device0)
@@ -69,11 +70,19 @@ def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record):
 
         # Clear up the space
         torch.cuda.empty_cache()
-        del Gloss, G_dy_dx, flatten_fake_g, grad_diff_l2, grad_diff_wd, grad_diff, tvloss
+        del Gloss, G_dy_dx, fake_g, grad_diff_l2, grad_diff_wd, grad_diff, tvloss
 
     # -----------------------------------------------------------------------------------------------
     #                                     Visualize the result
     # -----------------------------------------------------------------------------------------------
+    save_path = os.path.join(
+        args.root_path,
+        f"Results/Defense-{args.net_name}-{args.dataset}-B{str(args.batchsize).zfill(3)}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}/"
+    )
+    save_img_path = os.path.join(save_path, 'saved_img/')
+    print('>' * 10, save_path)
+    idx_net = 0
+
     for imidx in range(args.batchsize):
         plt.figure(figsize=(12, 8))
         plt.subplot(args.plot_num // 10, 10, 1)
@@ -93,14 +102,14 @@ def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record):
             fake_path = os.path.join(save_img_path, f'fake_data/exp{str(idx_net).zfill(3)}/')
             os.makedirs(true_path, exist_ok=True)
             os.makedirs(fake_path, exist_ok=True)
-            tp(gt_data[imidx].cpu()).save(os.path.join(true_path, f'{imidx}_{gt_label[imidx].item()}.png'))
+            tp(img_record[imidx].cpu()).save(os.path.join(true_path, f'{imidx}_{lbl_record[imidx].item()}.png'))
             history[-1][imidx].save(os.path.join(fake_path, f'{imidx}_{Glabel.argmax(dim=1)[imidx].item()}.png'))
 
-        plt.savefig(f'{save_path}/exp:{idx_net:03d}-imidx:{imidx:02d}-tlabel:{gt_label[imidx].item()}-Glabel:{Glabel.argmax(dim=1)[imidx].item()}.png')
+        plt.savefig(f'{save_path}/exp:{idx_net:03d}-imidx:{imidx:02d}-tlabel:{lbl_record[imidx].item()}-Glabel:{Glabel.argmax(dim=1)[imidx].item()}.png')
         plt.close()
 
     # Clear up the space
-    del Glabel, Gout, flatten_true_g, G_ran_in, net, Gnet
+    del Glabel, Gout, true_g, G_ran_in, net, Gnet
     torch.cuda.empty_cache()
     history.clear()
     history_l.clear()
@@ -122,15 +131,22 @@ if __name__ == '__main__':
     # dataset_test = datasets.MNIST('./data/mnist/', train=False, download=True, transform=trans_mnist)
     # args.num_channels = 1
     dataset_train, num_classes = gen_dataset(args.dataset, args.data_path, args.shape_img)
+    dataset_test, num_classes = gen_dataset(args.dataset, args.data_path, args.shape_img, train=False)
     tp = transforms.Compose([transforms.ToPILImage()])
     # train_loader = iter(torch.utils.data.DataLoader(dataset_train, batch_size=args.batchsize, shuffle=True, generator=torch.Generator(device='cuda'),))
     # --------------------------------------------------------------------------------
     
     # sample users
-    if args.iid:
-        dict_users = mnist_iid(dataset_train, args.num_users)
-    else:
+    # if args.iid:
+    #     dict_users = mnist_iid(dataset_train, args.num_users)
+    # else:
+    #     dict_users = mnist_noniid(dataset_train, args.num_users)
+    if args.dataset == "mnist":
         dict_users = mnist_noniid(dataset_train, args.num_users)
+    elif args.dataset == "lfw":
+        dict_users = lfw_noniid(dataset_train, args.num_users)
+    elif args.dataset == 'cifar10':
+        dict_users = cifar_noniid(dataset_train, args.num_users)
     img_size = dataset_train[0][0].shape
 
     # args.model == 'cnn'
@@ -165,22 +181,26 @@ if __name__ == '__main__':
     net_glob_record = None
     dy_dx_record = None
     img_record = None
+    lbl_record = None
+    acc_test = []
 
-    for iter in range(args.epochs):
+    flag = random.randint(0, args.epochs - 1)
+
+    for iter in tqdm(range(args.epochs), dynamic_ncols=True):
         # t_start = time.time()
         w_locals, loss_locals, weight_locals = [], [], []
         # round-robin selection
         begin_index = (iter % loop_index) * m
         end_index = begin_index + m
         idxs_users = all_clients[begin_index:end_index]
-        for idx in tqdm(idxs_users):
+        for idx in idxs_users:
             local = clients[idx]
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
 
             # XW: temporary implementation
             # --------------------------------------------------------------------------------
-            if iter == 0 and dy_dx_record is None:
-                w, loss, dy_dx_record, net_glob_record, img_record = local.record_train(net=copy.deepcopy(net_glob).to(args.device))
+            if iter == flag and dy_dx_record is None:
+                w, loss, dy_dx_record, net_glob_record, img_record, lbl_record = local.record_train(net=copy.deepcopy(net_glob).to(args.device))
             # --------------------------------------------------------------------------------
 
             w_locals.append(copy.deepcopy(w))
@@ -188,10 +208,23 @@ if __name__ == '__main__':
             weight_locals.append(len(dict_users[idx]))
 
         # update global weights
-        print("Enter weight avg phase of epoch {iter}")
+        print(f"Enter weight avg phase of epoch {iter}")
         w_glob = FedWeightAvg(w_locals, weight_locals)
         # copy weight to net_glob
         net_glob.load_state_dict(w_glob)
+
+        # XW: include plotting feature
+        # --------------------------------------------------------------------------------
+        net_glob.eval()
+        acc_t, loss_t = test_img(net_glob, dataset_test, args)
+        acc_test.append(acc_t.item())
+
+    plt.figure()
+    plt.plot(range(len(acc_test)), acc_test)
+    plt.ylabel('test accuracy')
+    plt.savefig('./Results/Fig/fed_{}_{}_{}_C{}_iid{}_dp_{}_epsilon_{}_acc.png'.format(
+        args.dataset, args.model, args.epochs, args.frac, args.iid, args.dp_mechanism, args.dp_epsilon))
+    # --------------------------------------------------------------------------------
 
     # XW: current trial, not examined
     # --------------------------------------------------------------------------------
@@ -203,5 +236,5 @@ if __name__ == '__main__':
         net_glob_record = net_glob_record._module
     net_copy.load_state_dict(net_glob_record.state_dict())
     net_copy.eval()
-    grnn_attack_on_certain_epoch(true_g, net_copy, num_classes, img_record)
+    grnn_attack_on_certain_epoch(true_g, net_copy, num_classes, img_record, lbl_record)
     # --------------------------------------------------------------------------------

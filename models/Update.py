@@ -80,29 +80,27 @@ class LocalUpdateDP(object):
 
         net_record = None
         img_record = None
+        lbl_record = None
 
         for idx, (images, labels) in enumerate(self.ldr_train):
             images, labels = images.to(self.args.device), labels.to(self.args.device)
             net.zero_grad()
             log_probs = net(images)
             loss = self.loss_func(log_probs, labels)
-            # auto_g = torch.autograd.grad(loss, net.parameters(), create_graph=True)
+
             loss.backward(retain_graph=True)
             # --------------------------------------------------------------------------------
             if self.args.dp_mechanism != 'no_dp':
                 self.clip_gradients(net)
                 self.add_noise_to_grad(net)
+                self.add_noise(net)
 
             if idx == len(self.ldr_train) - 1:
                 clipped_and_noised_grads = [param.grad.clone().detach() for param in net.parameters() if param.grad is not None]
                 net_record = copy.deepcopy(net).to(self.args.device)
                 img_record = images
+                lbl_record = labels
 
-            # optimizer.step()
-            # scheduler.step()
-            # # add noises to parameters
-            # if self.args.dp_mechanism != 'no_dp':
-            #     self.add_noise(net)
             optimizer.step()
             scheduler.step()
             # --------------------------------------------------------------------------------
@@ -110,7 +108,7 @@ class LocalUpdateDP(object):
         self.lr = scheduler.get_last_lr()[0]
 
         # auto_g = torch.autograd.grad(loss_client, net.parameters(), create_graph=True)
-        return net.state_dict(), loss_client, clipped_and_noised_grads, net_record, img_record
+        return net.state_dict(), loss_client, clipped_and_noised_grads, net_record, img_record, lbl_record
 
     def clip_gradients(self, net):
         if self.args.dp_mechanism == 'Laplace':
