@@ -25,6 +25,7 @@ from tqdm import tqdm
 from Backbone import *
 import time, datetime
 
+import math
 
 def my_seed():
     random.seed(123)
@@ -75,6 +76,15 @@ def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record, lbl_recor
     # -----------------------------------------------------------------------------------------------
     #                                     Visualize the result
     # -----------------------------------------------------------------------------------------------
+    def calculate_psnr(img1, img2):
+        """Calculate PSNR between two images."""
+        mse = np.mean((img1 - img2) ** 2)
+        if mse == 0:
+            return float('inf')
+        max_pixel = 255.0
+        psnr = 20 * math.log10(max_pixel / math.sqrt(mse))
+        return psnr
+
     save_path = os.path.join(
         args.root_path,
         f"Results/Defense-{args.net_name}-{args.dataset}-B{str(args.batchsize).zfill(3)}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}/"
@@ -105,8 +115,28 @@ def grnn_attack_on_certain_epoch(true_g, net, num_classes, img_record, lbl_recor
             tp(img_record[imidx].cpu()).save(os.path.join(true_path, f'{imidx}_{lbl_record[imidx].item()}.png'))
             history[-1][imidx].save(os.path.join(fake_path, f'{imidx}_{Glabel.argmax(dim=1)[imidx].item()}.png'))
 
+        # XW: add evaluation
+        # --------------------------------------------------------------------------------
+        if args.eval:
+            true_img = np.array(tp(img_record[imidx].cpu()))
+            fake_img = np.array(history[-1][imidx])
+            psnr_value = calculate_psnr(true_img, fake_img)
+            print(f'Image {imidx}: PSNR = {psnr_value:.2f} dB')
+            # plt.text(10, 12, f"PSNR: {psnr_value:.2f} dB", color="black", fontsize=12)
+            plt.gcf().text(
+                x=0.5,
+                y=0.02,
+                s=f"PSNR: {psnr_value:.2f} dB",
+                fontsize=14,
+                color="black",
+                weight="bold",
+                ha="center",
+                va="center"
+            )
+        # --------------------------------------------------------------------------------
+
         plt.savefig(f'{save_path}/exp:{idx_net:03d}-imidx:{imidx:02d}-tlabel:{lbl_record[imidx].item()}-Glabel:{Glabel.argmax(dim=1)[imidx].item()}.png')
-        plt.close()
+        plt.close()            
 
     # Clear up the space
     del Glabel, Gout, true_g, G_ran_in, net, Gnet
@@ -219,11 +249,12 @@ if __name__ == '__main__':
         acc_t, loss_t = test_img(net_glob, dataset_test, args)
         acc_test.append(acc_t.item())
 
-    plt.figure()
-    plt.plot(range(len(acc_test)), acc_test)
-    plt.ylabel('test accuracy')
-    plt.savefig('./Results/Fig/fed_{}_{}_{}_C{}_iid{}_dp_{}_epsilon_{}_acc.png'.format(
-        args.dataset, args.model, args.epochs, args.frac, args.iid, args.dp_mechanism, args.dp_epsilon))
+    if args.acc_curve:
+        plt.figure()
+        plt.plot(range(len(acc_test)), acc_test)
+        plt.ylabel('test accuracy')
+        plt.savefig('./Results/Fig/fed_{}_{}_{}_C{}_iid{}_dp_{}_epsilon_{}_acc.png'.format(
+            args.dataset, args.model, args.epochs, args.frac, args.iid, args.dp_mechanism, args.dp_epsilon))
     # --------------------------------------------------------------------------------
 
     # XW: current trial, not examined
@@ -238,3 +269,5 @@ if __name__ == '__main__':
     net_copy.eval()
     grnn_attack_on_certain_epoch(true_g, net_copy, num_classes, img_record, lbl_record)
     # --------------------------------------------------------------------------------
+
+    # python defense_trial.py --epochs 5 --frac 0.1 --iteration 3000 --dp_mechanism Laplace --dataset cifar10 --eval
